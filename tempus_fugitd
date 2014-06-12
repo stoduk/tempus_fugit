@@ -88,7 +88,27 @@ class TempusFugit(Daemon):
             self.log("starting")
             self._find_usbdrive()
             self.log("Have drive %s, do update %s" % (self.have_usb, self.do_update))
+
+            # XXX do we have any script/config update?  If so, move those over and reboot 
+            # immediately (don't want to get stuck in a loop always updating, hence move 
+            # rather than copy - could do the same with diff or md5 comparison)
+
+            # XXX decide if we should take a photo - probably don't want manual
+            # turn on (for updates/copying images off) to skew when we run
             self._take_picture()
+
+            # XXX copy images over.  ideally we'd have some way to know what we've already
+            # copied (just create some .foo file on USB drive containing files we've seen?)
+            # and a way to trigger deletion of files from local store (create some file with magic name?)
+
+            # XXX copy log file over.  Some way to scrub the log could be useful in case it gets too big
+
+            # XXX figure out when next to startup - most the time this will just be the
+            # frequency we want to run at (ie. if ever hour, just sleep for an hour)
+            # but need to be cleverer to cope with manual poewr on
+
+            # XXX set next power on, and power off immediately.
+
             self.log("shutting down")
         except Exception as e:
             self.error("something went wrong")
