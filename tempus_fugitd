@@ -6,6 +6,8 @@ import time
 from daemon import Daemon
 import syslog
 import traceback
+import picamera
+import datetime
 
 ### XXX temp - until mopiapi in right directory
 sys.path.append("/usr/sbin/")
@@ -38,17 +40,26 @@ class TempusFugit(Daemon):
      indicate power state)
     """
     UPDATE_DIR = "update/"
+    OUTPUT_DIR = "/home/pi/tempus_fugit"
+    ISO_TIME_FMT = "%Y%m%dT%H%M%S"
 
     def __init__(self, *args, **kwargs):
         self.do_update = False
         self.have_usb = False
+        try:
+            os.mkdir(self.OUTPUT_DIR)
+        except OSError:
+            if not os.path.exists(self.OUTPUT_DIR):
+                raise
         super(TempusFugit, self).__init__(*args, **kwargs)
+
     @staticmethod
     def log(str):
         syslog.syslog(str)
     @staticmethod
     def logerr(str):
         syslog.syslog(syslog.LOGERR, str)
+
     def _find_usbdrive(self, mountpoint="/media/usb0/"):
         """Look for an attached USB drive.  We are using "usbmount" to handle
         usb drive insertion, so it should be as simple as seeing if there is
@@ -59,11 +70,25 @@ class TempusFugit(Daemon):
             self.have_usb = True
             if os.path.exists(os.path.join(mountpoint, self.UPDATE_DIR)):
                 self.do_update = True
+    def _take_picture(self):
+        """Do the work of taking a picture
+
+        TBD:
+        - what resolution?  MAX_RESOLUTION creates 2.2Mb files, 1024x768 creates 485Kb (for jpeg)
+        - do I want to stick in any EXIF data?  My name, GPS info (which I'd fake), etc.
+        """
+        fname = "%s.jpg" % (datetime.datetime.today().strftime(self.ISO_TIME_FMT))
+        fname = os.path.join(self.OUTPUT_DIR, fname)
+        with picamera.PiCamera() as camera:
+            camera.resolution = (1024, 768) # TBD - do I want 
+            camera.capture(fname)
+
     def run(self):
         try:
             self.log("starting")
             self._find_usbdrive()
             self.log("Have drive %s, do update %s" % (self.have_usb, self.do_update))
+            self._take_picture()
             self.log("shutting down")
         except Exception as e:
             self.error("something went wrong")
