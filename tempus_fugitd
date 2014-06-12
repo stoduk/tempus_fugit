@@ -5,6 +5,7 @@ import sys
 import time
 from daemon import Daemon
 import syslog
+import traceback
 
 ### XXX temp - until mopiapi in right directory
 sys.path.append("/usr/sbin/")
@@ -42,6 +43,12 @@ class TempusFugit(Daemon):
         self.do_update = False
         self.have_usb = False
         super(TempusFugit, self).__init__(*args, **kwargs)
+    @staticmethod
+    def log(str):
+        syslog.syslog(str)
+    @staticmethod
+    def logerr(str):
+        syslog.syslog(syslog.LOGERR, str)
     def _find_usbdrive(self, mountpoint="/media/usb0/"):
         """Look for an attached USB drive.  We are using "usbmount" to handle
         usb drive insertion, so it should be as simple as seeing if there is
@@ -53,11 +60,14 @@ class TempusFugit(Daemon):
             if os.path.exists(os.path.join(mountpoint, self.UPDATE_DIR)):
                 self.do_update = True
     def run(self):
-        syslog.syslog("here")
-        self._find_usbdrive()
-        print "Have drive %s, do update %s" % (self.have_usb, self.do_update)
-       	while True:
-            time.sleep(1)
+        try:
+            self.log("starting")
+            self._find_usbdrive()
+            self.log("Have drive %s, do update %s" % (self.have_usb, self.do_update))
+            self.log("shutting down")
+        except Exception as e:
+            self.error("something went wrong")
+            self.error(traceback.format_exc())
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
