@@ -1,10 +1,61 @@
 #!/usr/bin/env python
 
-import sys, time
+import os
+import sys
+import time
 from daemon import Daemon
+import syslog
 
-class MyDaemon(Daemon):
+### XXX temp - until mopiapi in right directory
+sys.path.append("/usr/sbin/")
+### XXX temp
+import mopiapi
+
+class TempusFugit(Daemon):
+    """Raspberry Pi time lapse daemon
+
+    Designed to be run at startup on a Raspberry Pi running a MoPi power
+    monitor - such that we will be started once the RPi is up and running,
+    we'll do our work, and then ask MoPi to turn RPi off and wake up again
+    later.  Much like a hardware cron job.
+
+    This is designed with a network-unattahed RPi model A running off batteries
+    - this will give the longest possible battery life for our time lapse, but
+    to get sane dates on the photos we'll want a hardware RTC connected too.
+
+    The device is likely to be run remotely to the person who knows how to fix
+    it, so the aim is that everything can be run without needing an attached
+    monitor or any great intelligence.  The device will snap pictures away
+    at the configured times, and when a USB drive is plugged in it will update
+    itself and copy off any photos taken.  Nice and simple.
+
+    The work to do on each power up is:
+    - if a USB drive is found, copy over any new configuration
+     (this is useful as we are running remotely and not network connected)
+    - take a photo!
+    - if a USB drive is found, copy off any photos and log files (eg. to
+     indicate power state)
+    """
+    UPDATE_DIR = "update/"
+
+    def __init__(self, *args, **kwargs):
+        self.do_update = False
+        self.have_usb = False
+        super(TempusFugit, self).__init__(*args, **kwargs)
+    def _find_usbdrive(self, mountpoint="/media/usb0/"):
+        """Look for an attached USB drive.  We are using "usbmount" to handle
+        usb drive insertion, so it should be as simple as seeing if there is
+        anything under /media/usb0 (as we should only ever have a single device
+        connected on a single USB port Model A!
+        """
+        if os.path.ismount(mountpoint):
+            self.have_usb = True
+            if os.path.exists(os.path.join(mountpoint, self.UPDATE_DIR)):
+                self.do_update = True
     def run(self):
+        syslog.syslog("here")
+        self._find_usbdrive()
+        print "Have drive %s, do update %s" % (self.have_usb, self.do_update)
        	while True:
             time.sleep(1)
 
@@ -13,5 +64,5 @@ if __name__ == "__main__":
         print "ERROR: invalid args.  %s {pidfile}" % (sys.argv[0])
         sys.exit(1)
     pidfile = sys.argv[1]
-    daemon = MyDaemon(pidfile)
+    daemon = TempusFugit(pidfile)
     daemon.start()
