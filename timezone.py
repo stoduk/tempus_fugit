@@ -1,5 +1,11 @@
 #!/usr/bin/python
 
+#
+# Copied direct from https://docs.python.org/3/library/datetime.html#tzinfo-objects
+#
+# Needed by sunrise.py.
+#
+
 from datetime import tzinfo, timedelta, datetime
 
 ZERO = timedelta(0)
