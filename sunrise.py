@@ -44,15 +44,20 @@ class sun:
   self.long=long
   self.return_dates = return_dates
   
- def sunrise(self,when=None):
+ def sunrise(self, when=None, tomorrow=False):
   """
   return the time of sunrise as a datetime.time object or datetime.datetime
   object (depending on value of self.return_dates)
   when is a datetime.datetime object. If none is given
   a local time zone is assumed (including daylight saving
   if present)
+  tomorrow flag will be used if when is not specified to
+  add one complete day to current datetime
   """
-  if when is None : when = datetime.now(tz=LocalTimezone())
+  if when is None:
+    when = datetime.now(tz=LocalTimezone())
+    if tomorrow:
+      when += datetime.timedelta(days=1)
   self.__preptime(when)
   self.__calc()
   sunrise = sun.__timefromdecimalday(self.sunrise_t)
@@ -61,8 +66,11 @@ class sun:
   return sunrise
 
   
- def sunset(self,when=None):
-  if when is None : when = datetime.now(tz=LocalTimezone())
+ def sunset(self, when=None, tomorrow=False):
+  if when is None:
+    when = datetime.now(tz=LocalTimezone())
+    if tomorrow:
+      when += datetime.timedelta(days=1)
   self.__preptime(when)
   self.__calc()
   sunset = sun.__timefromdecimalday(self.sunset_t)
@@ -70,8 +78,11 @@ class sun:
     sunset = datetime.combine(when, sunset)
   return sunset
   
- def solarnoon(self,when=None):
-  if when is None : when = datetime.now(tz=LocalTimezone())
+ def solarnoon(self, when=None, tomorrow=False):
+  if when is None:
+    when = datetime.now(tz=LocalTimezone())
+    if tomorrow:
+      when += datetime.timedelta(days=1)
   self.__preptime(when)
   self.__calc()
   solarnoon = sun.__timefromdecimalday(self.solarnoon_t)

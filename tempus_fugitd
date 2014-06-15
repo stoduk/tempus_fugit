@@ -8,11 +8,26 @@ import syslog
 import traceback
 import picamera
 import datetime
+import sunrise
 
 ### XXX temp - until mopiapi in right directory
 sys.path.append("/usr/sbin/")
 ### XXX temp
 import mopiapi
+
+def roundTime(dt=None, roundTo=60*30):
+   """Round a datetime object to any time laps in seconds
+   dt : datetime.datetime object, default now.
+   roundTo : Closest number of seconds to round to, default 30 minutes.
+   Author: Thierry Husson 2012 - Use it as you want but don't blame me.
+
+   From: http://stackoverflow.com/questions/3463930/how-to-round-the-minute-of-a-datetime-object-python/10854034#10854034
+   """
+   if dt == None : dt = datetime.datetime.now()
+   seconds = (dt - dt.min).seconds
+   # // is a floor division, not a comment on following line:
+   rounding = (seconds+roundTo/2) // roundTo * roundTo
+   return dt + datetime.timedelta(0,rounding-seconds,-dt.microsecond)
 
 class TempusFugit(Daemon):
     """Raspberry Pi time lapse daemon
@@ -42,23 +57,34 @@ class TempusFugit(Daemon):
     UPDATE_DIR = "update/"
     OUTPUT_DIR = "/home/pi/tempus_fugit"
     ISO_TIME_FMT = "%Y%m%dT%H%M%S"
+    MAGIC_FILE_BLOCK_RELOAD = ".tempus_fugit.block_reload"
 
     def __init__(self, *args, **kwargs):
         self.do_update = False
         self.have_usb = False
+        self.block_reload = False
         try:
             os.mkdir(self.OUTPUT_DIR)
         except OSError:
             if not os.path.exists(self.OUTPUT_DIR):
                 raise
+
+        self.longitude = kwargs.pop("longitude", -0.3524)
+        self.latitude = kwargs.pop("latitude", 51.8175)
+
         super(TempusFugit, self).__init__(*args, **kwargs)
 
     @staticmethod
-    def log(str):
-        syslog.syslog(str)
+    def log(*args):
+        if len(args) == 1:
+            if isinstance(args[0], str):
+                msg = str(args[0])
+        else:
+            msg = str(args)
+        syslog.syslog(msg)
     @staticmethod
-    def logerr(str):
-        syslog.syslog(syslog.LOGERR, str)
+    def logerr(msg):
+        syslog.syslog(syslog.LOG_ERR, msg)
 
     def _find_usbdrive(self, mountpoint="/media/usb0/"):
         """Look for an attached USB drive.  We are using "usbmount" to handle
@@ -70,49 +96,177 @@ class TempusFugit(Daemon):
             self.have_usb = True
             if os.path.exists(os.path.join(mountpoint, self.UPDATE_DIR)):
                 self.do_update = True
-    def _take_picture(self):
-        """Do the work of taking a picture
+            if os.path.exists(os.path.join(mountpoint, self.MAGIC_FILE_BLOCK_RELOAD)):
+                self.block_reload = True
+    def _take_photo(self):
+        """Do the work of taking a photo
+
+        EXIF data is modified to add:
+        - copyright notice (currently my name and current year; config should
+          allow user to be specified)
+        - GPS location (which is obviously hardcoded as we have no GPS!
+          Currently hard coded to Harpenden location, it should be possible
+          to get this from self.latitude and self.logitude but the format
+          needs converting)
 
         TBD:
         - what resolution?  MAX_RESOLUTION creates 2.2Mb files, 1024x768 creates 485Kb (for jpeg)
-        - do I want to stick in any EXIF data?  My name, GPS info (which I'd fake), etc.
         """
         fname = "%s.jpg" % (datetime.datetime.today().strftime(self.ISO_TIME_FMT))
         fname = os.path.join(self.OUTPUT_DIR, fname)
         with picamera.PiCamera() as camera:
             camera.resolution = (1024, 768) # TBD - do I want 
+            camera.exif_tags["IFD0.Copyright"] = 'Copyright (c) %s Anthony Toole' % (datetime.datetime.now().year)
+            camera.exif_tags["GPS.GPSLatitudeRef"] = "N"
+            camera.exif_tags["GPS.GPSLatitude"] = "51/1,49/1,0/1"
+            camera.exif_tags["GPS.GPSLongitudeRef"] = "W"
+            camera.exif_tags["GPS.GPSLongitude"] = "0/1,21/1,25/1"
+
             camera.capture(fname)
 
+    def _think_hard(self):
+        """Work out what needs to be done, including:
+
+        - whether we need to update our scripts or config
+          We do this if there is "new" scripts/config present, which we
+          decide based on an MD5 hash of the old and new files
+        - whether we need to take a photo
+          We take a photo if we've been woken up by the timer (or if this is
+          our first power on), but not if we've been woken up by a button
+          press (which is used to trigger updates and offloading of photos)
+        - whether we need to copy off photos and logs, and delete local copies
+          We copy files off if there is a USB drive present - ordinarily we
+          just copy files over, leaving a backup locally.  If there is a magic
+          file on the USB drive however we will trigger removal of old photos
+          (which obviously requires remembering which photos have been
+          copied already!), and the same for log files.
+        - when we need to schedule our next wake up
+          Eventually I'll probably allow some way to specify exactly when
+          to take photos (perhaps in some cron style syntax) - but for now
+          just take a photo every 1/2 hour between sunrise and sunset.
+        """
+
+        # XXX ART TODO: do we need to update our scripts?
+        self.update_config = False
+
+        # XXX usb
+        self._find_usbdrive()
+        self.log("Have drive %s, do update %s, block reload %s" % (self.have_usb, self.do_update, self.block_reload))
+
+
+        # Note: though we could just look at the current time to decide whether
+        # this is a photo taking time that might not be very accurate as RPi's
+        # view of time (via hardware RTC) and MoPi's view of time (via a simple
+        # counter in microcontroller, I believe) are likely to differ.  So we'd
+        # need to cope with being woken up a little early or a little late and
+        # still do the right thing, and given we can also be woken up manually
+        # that is likely to be complicated.
+        #
+        # So we just use the MoPi's power on delay value, which means we'll
+        # at worst just take an extra photo when power is first turned on to
+        # MoPi:
+        #
+        # If MoPi's power on delay is non-zero then we haven't been woken up by 
+        # MoPi and so this is a manual startup (ie. a button press, to trigger 
+        # copying from/to USB).  If the power on delay is zero then it could be 
+        # that the timer expired or could be that the MoPi is being powered for 
+        # the first time - treat both the same and take a picture now.
+        self.mopi = mopiapi.mopiapi()
+        pod =  self.mopi.getPowerOnDelay()
+        if pod == 0:
+            self.take_photo = True
+        else:
+            self.take_photo = False
+
+        # XXX ART TODO: do we need to copy off files?
+        self.copy_files = False
+
+        # XXX ART TODO: do we need to remove old files and/or logs?
+        self.remove_old_files = False
+
+        # For now we just take photos every 1/2 hour between sunrise and
+        # sunset.  In future it might be nice to take extra photos around
+        # sunrise/sunset but our startup time might not be very accurate
+        # so it could be easier in that case to just stay powered on for the
+        # first/last 15 minutes of light or so.
+        s = sunrise.sun(lat=self.latitude, long=self.longitude, return_dates=True)
+        now = datetime.datetime.now()
+        srise = s.sunrise()
+        sset = s.sunset()
+        if now < srise or now > sset:
+            # It doesn't matter why we are awake (manual intervention or some
+            # timing error) - either way we'll wake when it is next light
+            # (ie. sunrise either today or tomorrow)
+            self.log("Woken at night! (now %s, sunrise %s, sunset %s, power on delay %s)" % (now, srise, sset, pod))
+            if now < srise:
+                target = srise
+            else:
+                target = s.sunrise(tomorrow=True)
+            # Round *up* to the next 1/2 hour
+            wakeup = roundTime(target)
+            if wakeup < target:
+                wakeup += datetime.timedelta(seconds=60*30)
+        elif pod == 0:
+            # We've been woken by timer (or first power up, which we cheat and
+            # treat the same) - schedule next photo in half hour.
+            # First round the current time to nearest 1/2 hour (in either direction)
+            # as clock skew could make it seem that we've woken up "too early" or "too late"
+            wakeup = roundTime(now) + datetime.timedelta(seconds=60*30)
+        else:
+            # we've been woken up manually, so our next wake up will be in less
+            # than half hour - round *up* to next half hour
+            target = now
+            wakeup = roundTime(target)
+            if wakeup < target:
+                wakeup += datetime.timedelta(seconds=60*30)
+        self.wakeup = wakeup
+        self.log("Target wakeup time %s based on current time %s, power on delay %s" % (self.wakeup, now, pod))
+
+    def _schedule_wake_up(self):
+        seconds = (self.wakeup - datetime.datetime.now()).seconds
+        self.log("Setting wakeup in %s seconds, shut down immediately active %s" % (seconds, not self.block_reload))
+        self.mopi.setPowerOnDelay(seconds)
+        if not self.block_reload:
+            self.mopi.setShutdownDelay(1)
+        
     def run(self):
         try:
-            self.log("starting")
-            self._find_usbdrive()
-            self.log("Have drive %s, do update %s" % (self.have_usb, self.do_update))
+            # log time for now, as I'm dubious about system time for now
+            # (I think when we've had power off we'll be run with the last
+            # known time which isn't good - hopefully RTC can be setup to
+            # sort local time before anything starts running to avoid this)
+            self.log("starting at %s" % (datetime.datetime.now()))
+            self._think_hard()
 
             # XXX do we have any script/config update?  If so, move those over and reboot 
             # immediately (don't want to get stuck in a loop always updating, hence move 
             # rather than copy - could do the same with diff or md5 comparison)
+            if self.update_config:
+                self.log("ERROR: haven't implemented script/config update!!")
 
             # XXX decide if we should take a photo - probably don't want manual
             # turn on (for updates/copying images off) to skew when we run
-            self._take_picture()
+            if self.take_photo:
+                self._take_photo()
 
             # XXX copy images over.  ideally we'd have some way to know what we've already
             # copied (just create some .foo file on USB drive containing files we've seen?)
             # and a way to trigger deletion of files from local store (create some file with magic name?)
-
             # XXX copy log file over.  Some way to scrub the log could be useful in case it gets too big
+            if self.copy_files:
+                self.log("ERROR: haven't implemented file copying!!")
 
-            # XXX figure out when next to startup - most the time this will just be the
-            # frequency we want to run at (ie. if ever hour, just sleep for an hour)
-            # but need to be cleverer to cope with manual poewr on
+            # XXX remove old files
+            if self.remove_old_files:
+                self.log("ERROR: haven't implemented removing old files!!")
 
-            # XXX set next power on, and power off immediately.
+            # schedule next power on, and power off immediately
+            self._schedule_wake_up()
 
-            self.log("shutting down")
+            self.log("shutting down at %s" % (datetime.datetime.now()))
         except Exception as e:
-            self.error("something went wrong")
-            self.error(traceback.format_exc())
+            self.logerr("something went wrong")
+            self.logerr(traceback.format_exc())
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
