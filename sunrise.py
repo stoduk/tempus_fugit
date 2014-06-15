@@ -11,7 +11,7 @@
 
 from math import cos,sin,acos,asin,tan
 from math import degrees as deg, radians as rad
-from datetime import date,datetime,time
+from datetime import date,datetime,time,timedelta
 
 # this module is not provided here. See text.
 from timezone import LocalTimezone
@@ -57,7 +57,7 @@ class sun:
   if when is None:
     when = datetime.now(tz=LocalTimezone())
     if tomorrow:
-      when += datetime.timedelta(days=1)
+      when += timedelta(days=1)
   self.__preptime(when)
   self.__calc()
   sunrise = sun.__timefromdecimalday(self.sunrise_t)
@@ -70,7 +70,7 @@ class sun:
   if when is None:
     when = datetime.now(tz=LocalTimezone())
     if tomorrow:
-      when += datetime.timedelta(days=1)
+      when += timedelta(days=1)
   self.__preptime(when)
   self.__calc()
   sunset = sun.__timefromdecimalday(self.sunset_t)
@@ -82,7 +82,7 @@ class sun:
   if when is None:
     when = datetime.now(tz=LocalTimezone())
     if tomorrow:
-      when += datetime.timedelta(days=1)
+      when += timedelta(days=1)
   self.__preptime(when)
   self.__calc()
   solarnoon = sun.__timefromdecimalday(self.solarnoon_t)
