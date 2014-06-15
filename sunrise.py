@@ -1,5 +1,14 @@
 #!/usr/bin/python
 
+#
+# Copied directly from http://michelanders.blogspot.ru/2010/12/calulating-sunrise-and-sunset-in-python.html
+#
+# Anthony Toole, 2014: modified to return datetime.datetime (rather than
+# datetime.time) if requested.  This makes more sense (as naturally every time
+# is referring to a specific date, because it has to be specified to calculate
+# the sunrise) and means that differences can be calculated on the returned
+# values.
+
 from math import cos,sin,acos,asin,tan
 from math import degrees as deg, radians as rad
 from datetime import date,datetime,time
@@ -19,13 +28,26 @@ class sun:
  s = sun(lat=49,long=3)
  print('sunrise at ',s.sunrise(when=datetime.datetime.now())
  """
- def __init__(self,lat=52.37,long=4.90): # default Amsterdam
+ def __init__(self,lat=52.37,long=4.90, return_dates=False):
+  """Initialise sun object for the specified location, defaulting to Amsterdam
+
+  lat and long arguments must be in decimal (rather than degrees, minutes,
+  seconds format)
+
+  If return_dates is False (default) then datetime.time objects will be
+  returned.  If True then datetime.datetime objects will be created - which
+  have the benefit of encoding the day that the calculation was done for, as
+  well as making it possible to calculate differences (eg. between sunrise and
+  current datetime).
+  """
   self.lat=lat
   self.long=long
+  self.return_dates = return_dates
   
  def sunrise(self,when=None):
   """
-  return the time of sunrise as a datetime.time object
+  return the time of sunrise as a datetime.time object or datetime.datetime
+  object (depending on value of self.return_dates)
   when is a datetime.datetime object. If none is given
   a local time zone is assumed (including daylight saving
   if present)
@@ -33,19 +55,29 @@ class sun:
   if when is None : when = datetime.now(tz=LocalTimezone())
   self.__preptime(when)
   self.__calc()
-  return sun.__timefromdecimalday(self.sunrise_t)
+  sunrise = sun.__timefromdecimalday(self.sunrise_t)
+  if self.return_dates:
+    sunrise = datetime.combine(when, sunrise)
+  return sunrise
+
   
  def sunset(self,when=None):
   if when is None : when = datetime.now(tz=LocalTimezone())
   self.__preptime(when)
   self.__calc()
-  return sun.__timefromdecimalday(self.sunset_t)
+  sunset = sun.__timefromdecimalday(self.sunset_t)
+  if self.return_dates:
+    sunset = datetime.combine(when, sunset)
+  return sunset
   
  def solarnoon(self,when=None):
   if when is None : when = datetime.now(tz=LocalTimezone())
   self.__preptime(when)
   self.__calc()
-  return sun.__timefromdecimalday(self.solarnoon_t)
+  solarnoon = sun.__timefromdecimalday(self.solarnoon_t)
+  if self.return_dates:
+    solarnoon = datetime.combine(when, solarnoon)
+  return solarnoon
   
  @staticmethod
  def __timefromdecimalday(day):
@@ -120,7 +152,5 @@ class sun:
 
 if __name__ == "__main__":
  s=sun(lat=52.37,long=4.90)
- s=sun(lat=51.5,long=-0.1299999) # London
- s=sun(lat=51.8175,long=-0.3524) # Harpenden
  print(datetime.today())
  print(s.sunrise(),s.solarnoon(),s.sunset())
