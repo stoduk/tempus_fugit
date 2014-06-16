@@ -211,6 +211,8 @@ class TempusFugit(Daemon):
         # XXX ART TODO: do we need to remove old files and/or logs?
         self.remove_old_files = False
 
+        self.log("Actions: update config %s, take photo %s, copy files %s, remove old files %s" % (self.update_config, self.take_photo, self.copy_files, self.remove_old_files))
+
         # For now we just take photos every 1/2 hour between sunrise and
         # sunset.  In future it might be nice to take extra photos around
         # sunrise/sunset but our startup time might not be very accurate
@@ -269,7 +271,10 @@ class TempusFugit(Daemon):
             first_time = datetime.datetime.now()
             ntp_duration = self._pause_for_ntp()
             second_time = datetime.datetime.now()
-            self.log("*** starting at %s; after %s seconds: %s; difference of %s" % (first_time, ntp_duration, second_time, second_time - first_time - datetime.timedelta(seconds=float(ntp_duration))))
+            time_diff = second_time - first_time - datetime.timedelta(seconds=float(ntp_duration))
+            if time_diff < datetime.timedelta():
+                time_diff = "-%s" % (abs(time_diff))
+            self.log("*** starting at %s; after %s seconds: %s; difference of %s" % (first_time, ntp_duration, second_time, time_diff))
 
             self._think_hard()
 
