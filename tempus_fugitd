@@ -11,6 +11,7 @@ import datetime
 import sunrise
 import subprocess
 import decimal
+import shutil
 
 ### XXX temp - until mopiapi in right directory
 sys.path.append("/usr/sbin/")
@@ -317,7 +318,8 @@ class TempusFugit(Daemon):
             # and a way to trigger deletion of files from local store (create some file with magic name?)
             # XXX copy log file over.  Some way to scrub the log could be useful in case it gets too big
             if self.copy_files:
-                self.log("ERROR: haven't implemented file copying!!")
+                self._copy_files()
+                self.log("ERROR: haven't fully implemented file copying!!")
 
             # XXX remove old files
             if self.remove_old_files:
