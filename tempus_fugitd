@@ -57,7 +57,8 @@ class TempusFugit(Daemon):
      indicate power state)
     """
     UPDATE_DIR = "update/"
-    OUTPUT_DIR = "/home/pi/tempus_fugit"
+    OUTPUT_DIR = "/home/pi/tempus_fugit/photos/"
+    USBDRIVE_MOUNTPOINT = "/media/usb0/"
     ISO_TIME_FMT = "%Y%m%dT%H%M%S"
     MAGIC_FILE_BLOCK_RELOAD = ".tempus_fugit.block_reload"
 
@@ -113,7 +114,7 @@ class TempusFugit(Daemon):
             print "."
             time.sleep(0.1)
 
-    def _find_usbdrive(self, mountpoint="/media/usb0/"):
+    def _find_usbdrive(self, mountpoint=USBDRIVE_MOUNTPOINT):
         """Look for an attached USB drive.  We are using "usbmount" to handle
         usb drive insertion, so it should be as simple as seeing if there is
         anything under /media/usb0 (as we should only ever have a single device
@@ -150,6 +151,29 @@ class TempusFugit(Daemon):
             camera.exif_tags["GPS.GPSLongitude"] = "0/1,21/1,25/1"
 
             camera.capture(fname)
+
+    def _copy_files(self):
+        """At some level this is simple - copy all photos and logs to the
+        attached USB drive.
+
+        The complexity appears because we want to have a way to specify that
+        (on a later USB insert) that "seen" files should be deleted - we
+        require manual intervention here to make sure that these files have
+        been backed up somewhere before we delete them
+
+        We force the manual step to avoid the case where a USB drive remains
+        plugged in but somehow gets corrupted - we don't want to remove
+        the local copy of files until we are sure the files on the USB drive
+        have been seen and verified.
+
+        So basically we create a file in the target directory containing
+        (a pickled) list of files that have been copied - when the user has
+        checked these copied correctly they can rename that file to have all
+        photos referenced in it deleted.  Obviously the names of the original
+        and renamed pickle files are well known.
+        """
+        # open pickle file, read what we have already
+        shutil.copy("/var/log/syslog", self.USBDRIVE_MOUNTPOINT)
 
     def _think_hard(self):
         """Work out what needs to be done, including:
