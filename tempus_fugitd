@@ -229,8 +229,7 @@ class TempusFugit(Daemon):
         else:
             self.take_photo = False
 
-        # XXX ART TODO: do we need to copy off files?
-        self.copy_files = False
+        self.copy_files = self.have_usb
 
         # XXX ART TODO: do we need to remove old files and/or logs?
         self.remove_old_files = False
