@@ -9,6 +9,8 @@ import traceback
 import picamera
 import datetime
 import sunrise
+import subprocess
+import decimal
 
 ### XXX temp - until mopiapi in right directory
 sys.path.append("/usr/sbin/")
@@ -85,6 +87,31 @@ class TempusFugit(Daemon):
     @staticmethod
     def logerr(msg):
         syslog.syslog(syslog.LOG_ERR, msg)
+
+    @staticmethod
+    def _pause_for_ntp():
+        """Block waiting for ntpd to have a valid peer - we assume that as
+        soon as we have a valid peer the system time will be correct, as RPi
+        using '-g' option
+        """
+        def uptime():
+            with open('/proc/uptime', 'r') as f:
+                return decimal.Decimal(f.readline().split()[0])
+
+        start_time = uptime()
+        while True:
+            for line in subprocess.check_output(["ntpdc", "-c sysinfo"], stderr=subprocess.STDOUT).split("\n"):
+                if line.startswith("system peer:"):
+                    peer = line.replace("system peer:", "")
+                    peer = peer.strip()
+                    print peer
+                    if peer == "0.0.0.0":
+                        print "Peer unknown"
+                    else:
+                        print "Peer found - stop"
+                        return uptime() - start_time
+            print "."
+            time.sleep(0.1)
 
     def _find_usbdrive(self, mountpoint="/media/usb0/"):
         """Look for an attached USB drive.  We are using "usbmount" to handle
@@ -235,7 +262,15 @@ class TempusFugit(Daemon):
             # (I think when we've had power off we'll be run with the last
             # known time which isn't good - hopefully RTC can be setup to
             # sort local time before anything starts running to avoid this)
-            self.log("starting at %s" % (datetime.datetime.now()))
+
+            # My doubt about system time is increasing!  RPi runs ntpd with -g option
+            # so it should set system time as soon as it gets an ntp peer - so make
+            # sure we don't proceed until we've got a valid peer
+            first_time = datetime.datetime.now()
+            ntp_duration = self._pause_for_ntp()
+            second_time = datetime.datetime.now()
+            self.log("*** starting at %s; after %s seconds: %s; difference of %s" % (first_time, ntp_duration, second_time, second_time - first_time - datetime.timedelta(seconds=float(ntp_duration))))
+
             self._think_hard()
 
             # XXX do we have any script/config update?  If so, move those over and reboot 
