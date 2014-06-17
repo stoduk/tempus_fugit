@@ -225,6 +225,8 @@ class TempusFugit(Daemon):
         # the first time - treat both the same and take a picture now.
         self.mopi = mopiapi.mopiapi()
         pod =  self.mopi.getPowerOnDelay()
+        voltage = self.mopi.getVoltage()
+
         if pod == 0:
             self.take_photo = True
         else:
@@ -273,7 +275,7 @@ class TempusFugit(Daemon):
             if wakeup < target:
                 wakeup += datetime.timedelta(seconds=60*30)
         self.wakeup = wakeup
-        self.log("Target wakeup time %s based on current time %s, power on delay %s" % (self.wakeup, now, pod))
+        self.log("Target wakeup time %s based on current time %s, power on delay %s [supply voltage %s]" % (self.wakeup, now, pod, voltage))
 
     def _schedule_wake_up(self):
         seconds = (self.wakeup - datetime.datetime.now()).seconds
