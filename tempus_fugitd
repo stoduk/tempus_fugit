@@ -260,8 +260,21 @@ class TempusFugit(Daemon):
     def _write_readme_file(self):
         instructions = """Instructions for tempus_fugit program
 
-xxx todo :)
-"""
+The time lapse module will sit there and turn itself on once every 1/2 hour
+between sunrise and sunset, snapping a picture each time.
+
+If a USB drive is found then photos will be copied off, with a meta-data file
+being created to show the last file copied.
+
+When files have been verified and saved elsewhere (eg. Flickr) then the
+meta-data file on the USB drive should be renamed (from
+'%s' to '%s', both in %s directory),
+which will trigger all the archived files to be deleted from the time lapse
+setup.
+
+If the time lapse is turned on manually then it will do an archive immediately
+but will not take a photo.
+""" % (self.MAGIC_FILE_SAVED_FILES, self.MAGIC_FILE_DELETE_FILES, self.MY_NAME)
         if self.have_usb:
             fname = os.path.join(self.USBDRIVE_MOUNTPOINT, "README.txt")
             if os.path.exists(fname) and not "tempus_fugit" in open(fname).readline():
