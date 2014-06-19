@@ -12,6 +12,9 @@ import sunrise
 import subprocess
 import decimal
 import shutil
+import errno
+import pickle
+from collections import namedtuple
 
 ### XXX temp - until mopiapi in right directory
 sys.path.append("/usr/sbin/")
@@ -57,11 +60,16 @@ class TempusFugit(Daemon):
     - if a USB drive is found, copy off any photos and log files (eg. to
      indicate power state)
     """
+    MY_NAME = "tempus_fugit"
     UPDATE_DIR = "update/"
-    OUTPUT_DIR = "/home/pi/tempus_fugit/photos/"
+    OUTPUT_DIR = "/home/pi/%s/photos/" % (MY_NAME)
     USBDRIVE_MOUNTPOINT = "/media/usb0/"
+    USBDRIVE_CONTROL_DIR = os.path.join(USBDRIVE_MOUNTPOINT, "%s/" % MY_NAME)
+    USBDRIVE_PHOTO_DIR = os.path.join(USBDRIVE_MOUNTPOINT, "photos/")
     ISO_TIME_FMT = "%Y%m%dT%H%M%S"
-    MAGIC_FILE_BLOCK_RELOAD = ".tempus_fugit.block_reload"
+    MAGIC_FILE_BLOCK_RELOAD = "block_reload"
+    MAGIC_FILE_SAVED_FILES = "saved_files"
+    MAGIC_FILE_DELETE_FILES = "saved_files.done"
 
     def __init__(self, *args, **kwargs):
         self.do_update = False
@@ -125,7 +133,7 @@ class TempusFugit(Daemon):
             self.have_usb = True
             if os.path.exists(os.path.join(mountpoint, self.UPDATE_DIR)):
                 self.do_update = True
-            if os.path.exists(os.path.join(mountpoint, self.MAGIC_FILE_BLOCK_RELOAD)):
+            if os.path.exists(os.path.join(mountpoint, self.USBDRIVE_CONTROL_DIR, self.MAGIC_FILE_BLOCK_RELOAD)):
                 self.block_reload = True
     def _take_photo(self):
         """Do the work of taking a photo
@@ -153,6 +161,115 @@ class TempusFugit(Daemon):
 
             camera.capture(fname)
 
+    def _get_photo_archive_info(self, copy=True):
+        """Return information on the locally stored photos, using the 
+        information stored on the USB drive to indicate the last file copied.
+
+        'copy' argument shows which file to look for - True for copy
+        operations, False for delete operations (remember that the user
+        manually renames the magic file to indicate that files previously
+        copied to USB drive have been verified and safely backed up
+
+        Returns a namedtuple containing:
+        - last_filename_copied: the name of the last file copied from local
+          store to USB drive
+        - archived: a list of files (in increasing date order) up to and
+          including last_filename_copied.  For delete operations this indicates
+          all the files that have been copied to USB and that the user has
+          indicated are safe to delete.  For copy operations this indicates the
+          files that have already been copied to USB drive (but not necessarily
+          saved elsewhere yet)
+        - unarchived: a list of files (in increasing date order) that are newer
+          than last_filename_copied.  For delete operations this indicates
+          files that have not been archived yet (and so must not be deleted
+          locally!).  For copy operations this indicates files that have not
+          been copied to USB drive yet.
+        """
+        magic_fname = self.MAGIC_FILE_SAVED_FILES if copy else self.MAGIC_FILE_DELETE_FILES
+        fname = os.path.join(self.USBDRIVE_CONTROL_DIR, magic_fname)
+
+        if os.path.exists(fname):
+            with open(fname) as f:
+                last_filename_copied = pickle.load(f)
+            if not copy:
+                # As we are about to delete all the files already copied, delete
+                # the control file - the deletes can't realistically fail (and if it could then we'll just recopy those files)
+                os.remove(fname)
+
+        else:
+            last_filename_copied = None # all files will be considered unarchived compared to this
+
+        # File name is YYYYMMDDTHHMMSS.jpg - so sorting will give us files
+        # in increasing date order
+        files = os.listdir(self.OUTPUT_DIR)
+        files.sort()
+
+        if last_filename_copied and not last_filename_copied in files:
+            self.logerr("Last saved file '%s' is not found in local store - assume all files are unarchived, as something is very wrong" % (last_filename_copied))
+            last_filename_copied = None
+
+        return namedtuple("photoarchive", "last_filename_copied archived unarchived")(
+            last_filename_copied,
+            [x for x in files if x <= last_filename_copied],
+            [x for x in files if x > last_filename_copied])
+
+    def _remove_old_files(self):
+        """Remove the files that have been archived elsewhere
+
+        The interface for this is pretty simple - when we copy files we do
+        this in age order (stopping if we run out of space), and store the
+        details of the last file copied over.  If the user wants the files to be deleted then they simply rename the file to indicate that.
+
+        This copes with several situations:
+        - USB drive left plugged in indefinitely.  Until the magic file appears
+          we will not remove any files from our local store, and will only copy
+          over until we've run out of space (at which point we'll still store
+          photos locally, but not on the USB drive)
+        - The user inserts a fresh USB drive (after having used a different
+          drive previously, but without deleting the locally stored copies
+          of those files).  We fail safe in this case and assume the previously
+          copied files are gone - and so recopy everything again.  It is up to
+          the user to deal with any duplication here - which should be easy due
+          to timestamps in filenames.
+        - USB drive plugged in for the first time.  This will behave exactly
+          like the previous case!
+        - The user deletes an old magic file.  This is the same as the fresh
+          USB drive case ie. we assume that nothing local has been copied
+          and let the user sort out any duplication.
+        """
+        info = self._get_photo_archive_info(copy=False)
+        if info.last_filename_copied:
+            os.chdir(self.OUTPUT_DIR)
+            archived = info.archived if info.archived else ["none", "none"]
+            unarchived = info.unarchived if info.unarchived else ["none", "none"]
+            self.log(
+                "Deleting %s files up to and including %s; leaving %s files "
+                "[delete: %s-%s; keep: %s-%s]" % 
+                (len(info.archived), info.last_filename_copied,
+                 len(info.unarchived), archived[0], archived[-1],
+                 unarchived[0], unarchived[-1]))
+            for file in info.archived:
+                os.remove(file)
+
+            # The record of files to delete has already been removed by worker above
+            # No need to create a new last_filename_copied control file - as
+            # we'll just copy everything if it isn't there, as we want.
+        else:
+            self.log("No delete file found, no files to delete")
+
+    def _write_readme_file(self):
+        instructions = """Instructions for tempus_fugit program
+
+xxx todo :)
+"""
+        if self.have_usb:
+            fname = os.path.join(self.USBDRIVE_MOUNTPOINT, "README.txt")
+            if os.path.exists(fname) and not "tempus_fugit" in open(fname).readline():
+                self.logerr("Readme file exists but doesn't appear to be ours - do nothing")
+            else:
+                with open(fname, "w") as f:
+                    f.write(instructions)
+                
     def _copy_files(self):
         """At some level this is simple - copy all photos and logs to the
         attached USB drive.
@@ -173,8 +290,55 @@ class TempusFugit(Daemon):
         photos referenced in it deleted.  Obviously the names of the original
         and renamed pickle files are well known.
         """
-        # open pickle file, read what we have already
-        shutil.copy("/var/log/syslog", self.USBDRIVE_MOUNTPOINT)
+        def free_space_mb():
+            stat = os.statvfs(self.USBDRIVE_MOUNTPOINT)
+            return stat.f_bsize * stat.f_bavail / 1024. / 1024.
+        info = self._get_photo_archive_info(copy=True)
+        fs_before = free_space_mb()
+
+        try:
+            # Swallow out of space error for this, syslog large so likely!
+            shutil.copy("/var/log/syslog", self.USBDRIVE_MOUNTPOINT)
+        except IOError as e:
+            if e.errno != errno.ENOSPC:
+                raise
+
+        os.chdir(self.OUTPUT_DIR)
+        if not os.path.exists(self.USBDRIVE_PHOTO_DIR):
+            os.mkdir(self.USBDRIVE_PHOTO_DIR) 
+
+        last_copied = info.last_filename_copied
+        for file in info.unarchived:
+            try:
+                shutil.copy(file, self.USBDRIVE_PHOTO_DIR)
+                last_copied = file
+            except IOError as e:
+                # Out of space error is expected so swallow just that.  Sadly
+                # I get a different error on the USB drive I was using
+                #  (errno.EINTR) so swallow all IOError and tidy up as best we
+                # can - if the drive is totally hosed then the cleanup (or 
+                # pickle file write) will bail out in a similar way so we'll
+                # see that
+                # 
+                # Helpfully shutil.copy will leave a partially copied file,
+                # so lets tidy up
+                fname = os.path.join(self.USBDRIVE_PHOTO_DIR, file)
+                os.remove(fname)
+
+        copied = [x for x in info.unarchived if x <= last_copied] or ["none", "none"]
+        uncopied = [x for x in info.unarchived if x > last_copied] or ["none", "none"]
+
+        fs_after = free_space_mb()
+        self.log(
+            "Copying files: %s available to copy after file %s; %s copied; %s "
+            "uncompied [copied %s-%s, uncopied %s-%s]; "
+            "free space before %sMb, after %sMb" % 
+            (len(info.unarchived), info.last_filename_copied, len(copied),
+             len(uncopied), copied[0], copied[-1], uncopied[0], uncopied[-1],
+             fs_before, fs_after))
+
+        # Store the name of the last file we saved, so we can resume next time
+        pickle.dump(last_copied, open(os.path.join(self.USBDRIVE_CONTROL_DIR, self.MAGIC_FILE_SAVED_FILES), "w"))
 
     def _think_hard(self):
         """Work out what needs to be done, including:
@@ -232,10 +396,8 @@ class TempusFugit(Daemon):
         else:
             self.take_photo = False
 
+        self.remove_old_files = self.have_usb
         self.copy_files = self.have_usb
-
-        # XXX ART TODO: do we need to remove old files and/or logs?
-        self.remove_old_files = False
 
         self.log("Actions: update config %s, take photo %s, copy files %s, remove old files %s" % (self.update_config, self.take_photo, self.copy_files, self.remove_old_files))
 
@@ -310,6 +472,14 @@ class TempusFugit(Daemon):
             if self.update_config:
                 self.log("ERROR: haven't implemented script/config update!!")
 
+            # Remove old files - obviously do this before writing new files
+            # in case we need to the space we are going to free up!
+            if self.remove_old_files:
+                self._remove_old_files()
+
+            # Write our instructional README file to the USB drive
+            self._write_readme_file()
+
             # XXX decide if we should take a photo - probably don't want manual
             # turn on (for updates/copying images off) to skew when we run
             if self.take_photo:
@@ -321,11 +491,6 @@ class TempusFugit(Daemon):
             # XXX copy log file over.  Some way to scrub the log could be useful in case it gets too big
             if self.copy_files:
                 self._copy_files()
-                self.log("ERROR: haven't fully implemented file copying!!")
-
-            # XXX remove old files
-            if self.remove_old_files:
-                self.log("ERROR: haven't implemented removing old files!!")
 
             # schedule next power on, and power off immediately
             self._schedule_wake_up()
