@@ -75,6 +75,7 @@ class TempusFugit(Daemon):
         self.do_update = False
         self.have_usb = False
         self.block_reload = False
+        self.hwclock = False
         try:
             os.mkdir(self.OUTPUT_DIR)
         except OSError:
@@ -98,17 +99,28 @@ class TempusFugit(Daemon):
     def logerr(msg):
         syslog.syslog(syslog.LOG_ERR, msg)
 
-    @staticmethod
-    def _pause_for_ntp():
-        """Block waiting for ntpd to have a valid peer - we assume that as
-        soon as we have a valid peer the system time will be correct, as RPi
-        using '-g' option
+    def _pause_for_systime(self):
+        """Block waiting for system to have a valid time (ie. not just the time
+        that was stored on last power down) - which means either:
+
+        - getting a time from a hardware clock if present
+        - waiting for NTP to have a valid peer, if no RTC is present (we assume
+          that as soon as we have a valid peer the system time will be correct,
+          as RPi is using '-g' option)
+
+        Returns the time it took to get a valid system time (which could be
+        significant if ntpd method is being used)
         """
         def uptime():
             with open('/proc/uptime', 'r') as f:
                 return decimal.Decimal(f.readline().split()[0])
 
         start_time = uptime()
+
+        if subprocess.call(["hwclock", "-r"]) == 0:
+            self.hwclock = True
+            return uptime() - start_time
+
         while True:
             for line in subprocess.check_output(["ntpdc", "-c sysinfo"], stderr=subprocess.STDOUT).split("\n"):
                 if line.startswith("system peer:"):
@@ -118,7 +130,7 @@ class TempusFugit(Daemon):
                     if peer == "0.0.0.0":
                         print "Peer unknown"
                     else:
-                        print "Peer found - stop"
+                        print "NTP peer found - stop"
                         return uptime() - start_time
             print "."
             time.sleep(0.1)
@@ -309,16 +321,23 @@ but will not take a photo.
         info = self._get_photo_archive_info(copy=True)
         fs_before = free_space_mb()
 
+        for dir in (self.USBDRIVE_CONTROL_DIR, self.USBDRIVE_PHOTO_DIR):
+            if not os.path.exists(dir):
+                os.mkdir(dir)
+
         try:
             # Swallow out of space error for this, syslog large so likely!
-            shutil.copy("/var/log/syslog", self.USBDRIVE_MOUNTPOINT)
+            shutil.copy("/var/log/syslog", self.USBDRIVE_CONTROL_DIR)
         except IOError as e:
             if e.errno != errno.ENOSPC:
                 raise
 
+        # Rotating logfiles can be done as often as we want,
+        # the config file determines how often something happens
+        if subprocess.call(["/usr/sbin/logrotate", "/etc/logrotate.conf"]) != 0:
+            self.log("Logrotate failed - continue regardless")
+
         os.chdir(self.OUTPUT_DIR)
-        if not os.path.exists(self.USBDRIVE_PHOTO_DIR):
-            os.mkdir(self.USBDRIVE_PHOTO_DIR) 
 
         last_copied = info.last_filename_copied
         for file in info.unarchived:
@@ -338,16 +357,22 @@ but will not take a photo.
                 fname = os.path.join(self.USBDRIVE_PHOTO_DIR, file)
                 os.remove(fname)
 
-        copied = [x for x in info.unarchived if x <= last_copied] or ["none", "none"]
-        uncopied = [x for x in info.unarchived if x > last_copied] or ["none", "none"]
+        copied = [x for x in info.unarchived if x <= last_copied]
+        uncopied = [x for x in info.unarchived if x > last_copied]
+        copied_count = len(copied)
+        uncopied_count = len(uncopied)
+        if not copied:
+            copied = ["none", "none"]
+        if not uncopied:
+            uncopied = ["none", "none"]
 
         fs_after = free_space_mb()
         self.log(
             "Copying files: %s available to copy after file %s; %s copied; %s "
-            "uncompied [copied %s-%s, uncopied %s-%s]; "
+            "uncopied [copied %s-%s, uncopied %s-%s]; "
             "free space before %sMb, after %sMb" % 
-            (len(info.unarchived), info.last_filename_copied, len(copied),
-             len(uncopied), copied[0], copied[-1], uncopied[0], uncopied[-1],
+            (len(info.unarchived), info.last_filename_copied, copied_count,
+             uncopied_count, copied[0], copied[-1], uncopied[0], uncopied[-1],
              fs_before, fs_after))
 
         # Store the name of the last file we saved, so we can resume next time
@@ -470,12 +495,12 @@ but will not take a photo.
             # so it should set system time as soon as it gets an ntp peer - so make
             # sure we don't proceed until we've got a valid peer
             first_time = datetime.datetime.now()
-            ntp_duration = self._pause_for_ntp()
+            systime_duration = self._pause_for_systime()
             second_time = datetime.datetime.now()
-            time_diff = second_time - first_time - datetime.timedelta(seconds=float(ntp_duration))
+            time_diff = second_time - first_time - datetime.timedelta(seconds=float(systime_duration))
             if time_diff < datetime.timedelta():
                 time_diff = "-%s" % (abs(time_diff))
-            self.log("*** starting at %s; after %s seconds: %s; difference of %s" % (first_time, ntp_duration, second_time, time_diff))
+            self.log("*** starting at %s; after %s seconds: %s; difference of %s (HW clock found? %s)" % (first_time, systime_duration, second_time, time_diff, self.hwclock))
 
             self._think_hard()
 
