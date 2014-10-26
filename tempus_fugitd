@@ -70,20 +70,22 @@ class TempusFugit(Daemon):
     MAGIC_FILE_BLOCK_RELOAD = "block_reload"
     MAGIC_FILE_SAVED_FILES = "saved_files"
     MAGIC_FILE_DELETE_FILES = "saved_files.done"
+    MAGIC_FILE_FULL_RESOLUTION = "full_resolution"
 
     def __init__(self, *args, **kwargs):
         self.do_update = False
         self.have_usb = False
         self.block_reload = False
         self.hwclock = False
+        self.full_resolution = False
         try:
             os.mkdir(self.OUTPUT_DIR)
         except OSError:
             if not os.path.exists(self.OUTPUT_DIR):
                 raise
 
-        self.longitude = kwargs.pop("longitude", -0.3524)
-        self.latitude = kwargs.pop("latitude", 51.8175)
+        self.longitude = kwargs.pop("longitude", -0.3570)
+        self.latitude = kwargs.pop("latitude", 51.8167)
 
         super(TempusFugit, self).__init__(*args, **kwargs)
 
@@ -98,6 +100,32 @@ class TempusFugit(Daemon):
     @staticmethod
     def logerr(msg):
         syslog.syslog(syslog.LOG_ERR, msg)
+
+    @staticmethod
+    def decimal_location_to_exif_gps(val_dec, latitude=True):
+        """Convert a decimal longitude or latitude to a string
+        suitable for use in EXIF GPS data (which for eg. 51 degrees, 49', 0''
+        would be "51/1,49/1,0/1")
+        """
+        if val_dec > 0:
+            if latitude:
+                ref = "N"
+            else:
+                ref = "E"
+        else:
+            if latitude:
+                ref = "S"
+            else:
+                ref = "W"
+            val_dec = -val_dec
+        degree = int(val_dec)
+        val_dec -= degree
+        val_dec *= 60
+        minute = int(val_dec)
+        val_dec -= minute
+        val_dec *= 60
+        second = int(val_dec)
+        return ("%u/1,%u/1,%u/1" % (degree, minute, second), ref)
 
     def _pause_for_systime(self):
         """Block waiting for system to have a valid time (ie. not just the time
@@ -147,30 +175,34 @@ class TempusFugit(Daemon):
                 self.do_update = True
             if os.path.exists(os.path.join(mountpoint, self.USBDRIVE_CONTROL_DIR, self.MAGIC_FILE_BLOCK_RELOAD)):
                 self.block_reload = True
+            if os.path.exists(os.path.join(mountpoint, self.USBDRIVE_CONTROL_DIR, self.MAGIC_FILE_FULL_RESOLUTION)):
+                self.full_resolution = True
     def _take_photo(self):
         """Do the work of taking a photo
 
         EXIF data is modified to add:
         - copyright notice (currently my name and current year; config should
           allow user to be specified)
-        - GPS location (which is obviously hardcoded as we have no GPS!
-          Currently hard coded to Harpenden location, it should be possible
-          to get this from self.latitude and self.logitude but the format
-          needs converting)
-
-        TBD:
-        - what resolution?  MAX_RESOLUTION creates 2.2Mb files, 1024x768 creates 485Kb (for jpeg)
+        - GPS location (which is obviously hardcoded as we have no GPS!)
         """
         fname = "%s.jpg" % (datetime.datetime.today().strftime(self.ISO_TIME_FMT))
         fname = os.path.join(self.OUTPUT_DIR, fname)
         with picamera.PiCamera() as camera:
             camera.led = False # Turn off LED to avoid reflection shooting through glass
-            camera.resolution = (1024, 768) # TBD - do I want 
+            if self.full_resolution:
+                camera.resolution = camera.MAX_RESOLUTION
+            else:
+                camera.resolution = (1024, 768)
+
             camera.exif_tags["IFD0.Copyright"] = 'Copyright (c) %s Anthony Toole' % (datetime.datetime.now().year)
-            camera.exif_tags["GPS.GPSLatitudeRef"] = "N"
-            camera.exif_tags["GPS.GPSLatitude"] = "51/1,49/1,0/1"
-            camera.exif_tags["GPS.GPSLongitudeRef"] = "W"
-            camera.exif_tags["GPS.GPSLongitude"] = "0/1,21/1,25/1"
+
+            location, ref = self.decimal_location_to_exif_gps(self.latitude, True)
+            camera.exif_tags["GPS.GPSLatitudeRef"] = ref
+            camera.exif_tags["GPS.GPSLatitude"] = location
+
+            location, ref = self.decimal_location_to_exif_gps(self.longitude, False)
+            camera.exif_tags["GPS.GPSLongitudeRef"] = ref
+            camera.exif_tags["GPS.GPSLongitude"] = location
 
             camera.capture(fname)
 
@@ -295,6 +327,12 @@ but will not take a photo.
             else:
                 with open(fname, "w") as f:
                     f.write(instructions)
+
+    @staticmethod
+    def free_space_mb(path):
+        # Return the free space for the specified volume mounted at path
+        stat = os.statvfs(path)
+        return int(stat.f_bsize * stat.f_bavail / 1024. / 1024.)
                 
     def _copy_files(self):
         """At some level this is simple - copy all photos and logs to the
@@ -316,11 +354,8 @@ but will not take a photo.
         photos referenced in it deleted.  Obviously the names of the original
         and renamed pickle files are well known.
         """
-        def free_space_mb():
-            stat = os.statvfs(self.USBDRIVE_MOUNTPOINT)
-            return stat.f_bsize * stat.f_bavail / 1024. / 1024.
         info = self._get_photo_archive_info(copy=True)
-        fs_before = free_space_mb()
+        fs_before = self.free_space_mb(self.USBDRIVE_MOUNTPOINT)
 
         for dir in (self.USBDRIVE_CONTROL_DIR, self.USBDRIVE_PHOTO_DIR):
             if not os.path.exists(dir):
@@ -367,7 +402,7 @@ but will not take a photo.
         if not uncopied:
             uncopied = ["none", "none"]
 
-        fs_after = free_space_mb()
+        fs_after = self.free_space_mb(self.USBDRIVE_MOUNTPOINT)
         self.log(
             "Copying files: %s available to copy after file %s; %s copied; %s "
             "uncopied [copied %s-%s, uncopied %s-%s]; "
@@ -438,7 +473,7 @@ but will not take a photo.
         self.remove_old_files = self.have_usb
         self.copy_files = self.have_usb
 
-        self.log("Actions: update config %s, take photo %s, copy files %s, remove old files %s" % (self.update_config, self.take_photo, self.copy_files, self.remove_old_files))
+        self.log("Actions: update config %s, take photo %s (full resolution %s), copy files %s, remove old files %s" % (self.update_config, self.take_photo, self.full_resolution, self.copy_files, self.remove_old_files))
 
         # For now we just take photos every 1/2 hour between sunrise and
         # sunset.  In future it might be nice to take extra photos around
@@ -449,6 +484,8 @@ but will not take a photo.
         now = datetime.datetime.now()
         srise = s.sunrise()
         sset = s.sunset()
+
+        self.log("Running with %sMb free space locally at %s; sunrise %s; sunset %s" % (self.free_space_mb("/home/pi"), now, srise, sset))
         if now < srise or now > sset:
             # It doesn't matter why we are awake (manual intervention or some
             # timing error) - either way we'll wake when it is next light
