@@ -156,13 +156,12 @@ class TempusFugit(Daemon):
                 if line.startswith("system peer:"):
                     peer = line.replace("system peer:", "")
                     peer = peer.strip()
-                    print peer
                     if peer == "0.0.0.0":
-                        print "Peer unknown"
+                        self.log("Peer unknown")
                     else:
-                        print "NTP peer found - stop"
+                        self.log("NTP peer found - stop")
                         return uptime() - start_time
-            print "."
+            self.log(".")
             time.sleep(0.1)
 
     def _load_and_validate_config(self, filename):
