@@ -15,6 +15,7 @@ import shutil
 import errno
 import pickle
 from collections import namedtuple
+import ConfigParser
 
 ### XXX temp - until mopiapi in right directory
 sys.path.append("/usr/sbin/")
@@ -68,24 +69,25 @@ class TempusFugit(Daemon):
     USBDRIVE_PHOTO_DIR = os.path.join(USBDRIVE_MOUNTPOINT, "photos/")
     ISO_TIME_FMT = "%Y%m%dT%H%M%S"
     MAGIC_FILE_BLOCK_RELOAD = "block_reload"
+    MAGIC_FILE_TAKE_PHOTO = "force_photo"
     MAGIC_FILE_SAVED_FILES = "saved_files"
     MAGIC_FILE_DELETE_FILES = "saved_files.done"
-    MAGIC_FILE_FULL_RESOLUTION = "full_resolution"
+    MAGIC_FILE_CONFIG_NEW = "tempus_fugitd.cfg"
+    MAGIC_FILE_CONFIG_ACTIVE = "/etc/tempus_fugitd"
+    REQUIRED_CONFIG = set(["name", "latitude", "longitude", "resolution"])
 
     def __init__(self, *args, **kwargs):
+        self.config = None
         self.do_update = False
         self.have_usb = False
         self.block_reload = False
+        self.force_photo = False
         self.hwclock = False
-        self.full_resolution = False
         try:
             os.mkdir(self.OUTPUT_DIR)
         except OSError:
             if not os.path.exists(self.OUTPUT_DIR):
                 raise
-
-        self.longitude = kwargs.pop("longitude", -0.3570)
-        self.latitude = kwargs.pop("latitude", 51.8167)
 
         super(TempusFugit, self).__init__(*args, **kwargs)
 
@@ -163,6 +165,61 @@ class TempusFugit(Daemon):
             print "."
             time.sleep(0.1)
 
+    def _load_and_validate_config(self, filename):
+        """Load config from the specified file, and do some validation:
+
+        - check ConfigParser can read it!
+        - check the minimum required set of fields are present
+        - check those fields are valid
+
+        Any other config fields (if any) will not be validated here - as they
+        are optional they can be validated when needed and ignored if not
+        valid.
+        """
+        config = ConfigParser.ConfigParser()
+        config.read(filename)
+        if not self.REQUIRED_CONFIG.issubset(set(config.defaults())):
+            self.log("Missing required config: %s" % (self.REQUIRED_CONFIG - set(config.defaults())))
+            raise ValueError
+        fields = {}
+
+        # name - no validation
+        fields["name"] = config.get("DEFAULT", "name")
+
+        # resolution - either "MAX" or wxh (where w and h are integers)
+        resolution = config.get("DEFAULT", "resolution")
+        if resolution == "MAX":
+            fields["resolution"] = "MAX"
+        else:
+            try:
+                width, height = map(int, resolution.split("x"))
+                fields["resolution"] = (width, height)
+            except ValueError:
+                # This will catch both int() conversion issues, and incorrect
+                # number of values in unpacking.
+                self.log("Specified resolution (%s) is invalid - ignoring config file" % (resolution))
+                raise
+
+        # latitude and longitude
+        try:
+            latitude_str = config.get("DEFAULT", "latitude")
+            longitude_str = config.get("DEFAULT", "longitude")
+            latitude = float(latitude_str)
+            longitude = float(longitude_str)
+            if latitude > 90 or latitude < -90 or longitude > 180 or longitude < -180:
+                raise ValueError
+            fields["latitude"] = latitude
+            fields["longitude"] = longitude
+        except ValueError:
+            self.log("Specified longitude (%s) or latitude (%s) is invalid - ignore config" % (longitude_str, latitude_str))
+            raise
+
+        # All mandatory config is valid, so store it!
+        self.__dict__.update(fields)
+        self.log("Config read ok - required config: %s" % (fields))
+        
+        return config
+
     def _find_usbdrive(self, mountpoint=USBDRIVE_MOUNTPOINT):
         """Look for an attached USB drive.  We are using "usbmount" to handle
         usb drive insertion, so it should be as simple as seeing if there is
@@ -175,8 +232,17 @@ class TempusFugit(Daemon):
                 self.do_update = True
             if os.path.exists(os.path.join(mountpoint, self.USBDRIVE_CONTROL_DIR, self.MAGIC_FILE_BLOCK_RELOAD)):
                 self.block_reload = True
-            if os.path.exists(os.path.join(mountpoint, self.USBDRIVE_CONTROL_DIR, self.MAGIC_FILE_FULL_RESOLUTION)):
-                self.full_resolution = True
+            if os.path.exists(os.path.join(mountpoint, self.USBDRIVE_CONTROL_DIR, self.MAGIC_FILE_TAKE_PHOTO)):
+                self.force_photo = True
+            new_config_filename = os.path.join(mountpoint, self.USBDRIVE_CONTROL_DIR, self.MAGIC_FILE_CONFIG_NEW)
+            if os.path.exists(new_config_filename):
+                try:
+                    self.config = self._load_and_validate_config(new_config_filename)
+                    shutil.copyfile(new_config_filename, self.MAGIC_FILE_CONFIG_ACTIVE)
+                    os.rename(new_config_filename, new_config_filename + ".done")
+                    self.log("Config updated from USB drive")
+                except:
+                    self.log("Failed to parse new config file, ignoring")
     def _take_photo(self):
         """Do the work of taking a photo
 
@@ -189,12 +255,16 @@ class TempusFugit(Daemon):
         fname = os.path.join(self.OUTPUT_DIR, fname)
         with picamera.PiCamera() as camera:
             camera.led = False # Turn off LED to avoid reflection shooting through glass
-            if self.full_resolution:
+            if self.resolution == "MAX":
                 camera.resolution = camera.MAX_RESOLUTION
             else:
-                camera.resolution = (1024, 768)
+                try:
+                    camera.resolution = self.resolution
+                except:
+                    self.log("Resolution specified in configuration is invalid (%s) - set to MAX" % (str(self.resolution)))
+                    camera.resolution = camera.MAX_RESOLUTION
 
-            camera.exif_tags["IFD0.Copyright"] = 'Copyright (c) %s Anthony Toole' % (datetime.datetime.now().year)
+            camera.exif_tags["IFD0.Copyright"] = 'Copyright (c) %s %s' % (datetime.datetime.now().year, self.name)
 
             location, ref = self.decimal_location_to_exif_gps(self.latitude, True)
             camera.exif_tags["GPS.GPSLatitudeRef"] = ref
@@ -303,23 +373,71 @@ class TempusFugit(Daemon):
             self.log("No delete file found, no files to delete")
 
     def _write_readme_file(self):
+        def full_usbdrive_path(file):
+            return os.path.join(self.MY_NAME, file)
         instructions = """Instructions for tempus_fugit program
 
 The time lapse module will sit there and turn itself on once every 1/2 hour
 between sunrise and sunset, snapping a picture each time.
 
-If a USB drive is found then photos will be copied off, with a meta-data file
-being created to show the last file copied.
+If a USB drive is found when the camera powers on (manually or due to its
+timer) then photos will be copied off (as well as doing any necessary
+house keeping)
 
-When files have been verified and saved elsewhere (eg. Flickr) then the
-meta-data file on the USB drive should be renamed (from
-'%s' to '%s', both in %s directory),
-which will trigger all the archived files to be deleted from the time lapse
-setup.
+If the time lapse is turned on manually then it will do any house keeping
+necessary (archive images, delete "seen" images, update config, etc.) but will
+not ordinarily take a photo.
 
-If the time lapse is turned on manually then it will do an archive immediately
-but will not take a photo.
-""" % (self.MAGIC_FILE_SAVED_FILES, self.MAGIC_FILE_DELETE_FILES, self.MY_NAME)
+1) Setup
+- this assumes all scripts are already installed
+- create a config file, see here for a sample:
+  https://github.com/stoduk/tempus_fugit/blob/master/tempus_fugitd.cfg
+- save the config file in the root of the USB drive, with the name
+  %s
+- insert the USB drive, power on the camera
+
+2) Changing batteries
+Any time the batteries are disconnected from the camera this will make the
+camera forget to turn itself on again.  So after the batteries are
+disconnected the camera should be powered on so that the right decisions
+and scheduling can be done.
+
+It is safe to turn the camera on manually at any time, the only impact is on
+the battery levels!
+
+3) Archiving photos
+The camera stores photos to its local storge, but will copy them off whenever
+a USB drive is inserted.  It will *not* delete the locally stored files until
+it is told to do so - this should only be done once the photos have been copied
+elsewhere (eg. uploaded to Flickr) to avoid photo loss.
+
+- any time a USB drive is present when the camera is powered on (either from
+its timer or manually) then it will copy across as many photos as it can.
+
+- once the photos on the USB drive have been archived elsewhere, the camera
+can be told to delete them.  This is done by renaming the file named
+  %s
+to
+  %s
+
+3) Debugging
+If the following magic files exist then certain behaviour is forced - this
+will mostly be for debugging purposes, or initial setup testing:
+
+a) %s
+If this file exists on the USB drive then the camera will not shut down after
+its work is done.  Only needed for debugging.
+
+b) %s
+If this file exists on the USB drive then it forces the camera to take a
+photo even if it doesn't think it is time
+
+c) %s
+This will contain syslog from the camera, useful for debugging problems.
+""" % tuple(map(full_usbdrive_path,
+       [self.MAGIC_FILE_CONFIG_NEW, self.MAGIC_FILE_SAVED_FILES,
+        self.MAGIC_FILE_DELETE_FILES, self.MAGIC_FILE_BLOCK_RELOAD,
+        self.MAGIC_FILE_TAKE_PHOTO, "syslog"]))
         if self.have_usb:
             fname = os.path.join(self.USBDRIVE_MOUNTPOINT, "README.txt")
             if os.path.exists(fname) and not "tempus_fugit" in open(fname).readline():
@@ -417,9 +535,10 @@ but will not take a photo.
     def _think_hard(self):
         """Work out what needs to be done, including:
 
-        - whether we need to update our scripts or config
-          We do this if there is "new" scripts/config present, which we
-          decide based on an MD5 hash of the old and new files
+        - whether we need to update our scripts or config.  Config
+          updating it implemented (we check we can parse the new file, and 
+          if so copy it across - all done earlier so no need for us to restart
+          to stay sane).  Script updating is not yet implemented..
         - whether we need to take a photo
           We take a photo if we've been woken up by the timer (or if this is
           our first power on), but not if we've been woken up by a button
@@ -436,13 +555,14 @@ but will not take a photo.
           just take a photo every 1/2 hour between sunrise and sunset.
         """
 
-        # XXX ART TODO: do we need to update our scripts?
-        self.update_config = False
-
-        # XXX usb
+        # Look for the USB drive which can trigger interesting things
+        # (including a new config file, which we want to validate/read before
+        # any of the config items are needed)
         self._find_usbdrive()
         self.log("Have drive %s, do update %s, block reload %s" % (self.have_usb, self.do_update, self.block_reload))
 
+        if not self.config:
+            self.config = self._load_and_validate_config(self.MAGIC_FILE_CONFIG_ACTIVE)
 
         # Note: though we could just look at the current time to decide whether
         # this is a photo taking time that might not be very accurate as RPi's
@@ -470,10 +590,13 @@ but will not take a photo.
         else:
             self.take_photo = False
 
+        if self.force_photo:
+            self.take_photo = True
+
         self.remove_old_files = self.have_usb
         self.copy_files = self.have_usb
 
-        self.log("Actions: update config %s, take photo %s (full resolution %s), copy files %s, remove old files %s" % (self.update_config, self.take_photo, self.full_resolution, self.copy_files, self.remove_old_files))
+        self.log("Actions: take photo %s (force flag set %s), copy files %s, remove old files %s" % (self.take_photo, self.force_photo, self.copy_files, self.remove_old_files))
 
         # For now we just take photos every 1/2 hour between sunrise and
         # sunset.  In future it might be nice to take extra photos around
@@ -542,12 +665,6 @@ but will not take a photo.
 
             self._think_hard()
 
-            # XXX do we have any script/config update?  If so, move those over and reboot 
-            # immediately (don't want to get stuck in a loop always updating, hence move 
-            # rather than copy - could do the same with diff or md5 comparison)
-            if self.update_config:
-                self.log("ERROR: haven't implemented script/config update!!")
-
             # Remove old files - obviously do this before writing new files
             # in case we need to the space we are going to free up!
             if self.remove_old_files:
@@ -556,15 +673,9 @@ but will not take a photo.
             # Write our instructional README file to the USB drive
             self._write_readme_file()
 
-            # XXX decide if we should take a photo - probably don't want manual
-            # turn on (for updates/copying images off) to skew when we run
             if self.take_photo:
                 self._take_photo()
 
-            # XXX copy images over.  ideally we'd have some way to know what we've already
-            # copied (just create some .foo file on USB drive containing files we've seen?)
-            # and a way to trigger deletion of files from local store (create some file with magic name?)
-            # XXX copy log file over.  Some way to scrub the log could be useful in case it gets too big
             if self.copy_files:
                 self._copy_files()
 
