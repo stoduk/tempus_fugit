@@ -75,6 +75,8 @@ class TempusFugit(Daemon):
     MAGIC_FILE_CONFIG_NEW = "tempus_fugitd.cfg"
     MAGIC_FILE_CONFIG_ACTIVE = "/etc/tempus_fugitd"
     REQUIRED_CONFIG = set(["name", "latitude", "longitude", "resolution"])
+    OPTIONAL_CAMERA_CONFIG = ["awb_mode", "brightness", "contrast", "exposure_compensation", "exposure_mode", "meter_mode", "rotation", "saturation", "sharpness", "shutter_speed"]
+    OPTIONAL_CONFIG = [].extend(OPTIONAL_CAMERA_CONFIG)
 
     def __init__(self, *args, **kwargs):
         self.config = None
@@ -95,8 +97,16 @@ class TempusFugit(Daemon):
     def log(*args):
         if len(args) == 1:
             if isinstance(args[0], str):
+                # Args are a single string (which might have been a format
+                #  string that is now calculated)
+                msg = str(args[0])
+            else:
+                # Args are a single item but not a string - do our best to
+                # output (note: this catches cases where we have wrong number
+                # of args for format!)
                 msg = str(args[0])
         else:
+            # Args are a bunch of random items, stringify as best we can.
             msg = str(args)
         syslog.syslog(msg)
     @staticmethod
@@ -263,6 +273,23 @@ class TempusFugit(Daemon):
                     self.log("Resolution specified in configuration is invalid (%s) - set to MAX" % (str(self.resolution)))
                     camera.resolution = camera.MAX_RESOLUTION
 
+            for attr in self.OPTIONAL_CAMERA_CONFIG:
+                if not attr in self.config.defaults():
+                    continue
+                val = self.config.get("DEFAULT", attr)
+
+                try:
+                    # picamera is fussy about types - can't be an int pretending to be a string
+                    val = int(val)
+                except ValueError:
+                    pass
+
+                try:
+                    old_val = camera.__getattribute__(attr)
+                    camera.__setattr__(attr, val)
+                    self.log("Camera: set attr '%s' to value '%s' (old value '%s')" % (attr, val, old_val))
+                except picamera.exc.PiCameraValueError:
+                    self.log("Camera: FAILED to set attr '%s' to value '%s' - ignoring (original value '%s')" % (attr, val, old_val))
             camera.exif_tags["IFD0.Copyright"] = 'Copyright (c) %s %s' % (datetime.datetime.now().year, self.name)
 
             location, ref = self.decimal_location_to_exif_gps(self.latitude, True)
