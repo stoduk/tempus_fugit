@@ -259,10 +259,17 @@ class TempusFugit(Daemon):
         - copyright notice (currently my name and current year; config should
           allow user to be specified)
         - GPS location (which is obviously hardcoded as we have no GPS!)
+
+        Config is read to determine any modifications to camera settings
+        (exposure for example), with a photo taken with and without these settings
+        (just in case someone sets it up to take a terrible photo!)
         """
         fname = "%s.jpg" % (datetime.datetime.today().strftime(self.ISO_TIME_FMT))
         fname = os.path.join(self.OUTPUT_DIR, fname)
+        fname_orig = fname.replace(".jpg", "_original.jpg")
         with picamera.PiCamera() as camera:
+            # Setup the camera with all the settings that can't cause a photo
+            # to come out terribly - and take one photo with those settings
             camera.led = False # Turn off LED to avoid reflection shooting through glass
             if self.resolution == "MAX":
                 camera.resolution = camera.MAX_RESOLUTION
@@ -272,7 +279,21 @@ class TempusFugit(Daemon):
                 except:
                     self.log("Resolution specified in configuration is invalid (%s) - set to MAX" % (str(self.resolution)))
                     camera.resolution = camera.MAX_RESOLUTION
+            camera.exif_tags["IFD0.Copyright"] = 'Copyright (c) %s %s' % (datetime.datetime.now().year, self.name)
 
+            location, ref = self.decimal_location_to_exif_gps(self.latitude, True)
+            camera.exif_tags["GPS.GPSLatitudeRef"] = ref
+            camera.exif_tags["GPS.GPSLatitude"] = location
+
+            location, ref = self.decimal_location_to_exif_gps(self.longitude, False)
+            camera.exif_tags["GPS.GPSLongitudeRef"] = ref
+            camera.exif_tags["GPS.GPSLongitude"] = location
+
+            # First take a photo with the unmodified settings (ie. most things on auto)
+            camera.capture(fname_orig)
+
+            take_modified_photo = False
+            # Now apply the config settings and take a second photo
             for attr in self.OPTIONAL_CAMERA_CONFIG:
                 if not attr in self.config.defaults():
                     continue
@@ -288,19 +309,12 @@ class TempusFugit(Daemon):
                     old_val = camera.__getattribute__(attr)
                     camera.__setattr__(attr, val)
                     self.log("Camera: set attr '%s' to value '%s' (old value '%s')" % (attr, val, old_val))
+                    take_modified_photo = True
                 except picamera.exc.PiCameraValueError:
                     self.log("Camera: FAILED to set attr '%s' to value '%s' - ignoring (original value '%s')" % (attr, val, old_val))
-            camera.exif_tags["IFD0.Copyright"] = 'Copyright (c) %s %s' % (datetime.datetime.now().year, self.name)
 
-            location, ref = self.decimal_location_to_exif_gps(self.latitude, True)
-            camera.exif_tags["GPS.GPSLatitudeRef"] = ref
-            camera.exif_tags["GPS.GPSLatitude"] = location
-
-            location, ref = self.decimal_location_to_exif_gps(self.longitude, False)
-            camera.exif_tags["GPS.GPSLongitudeRef"] = ref
-            camera.exif_tags["GPS.GPSLongitude"] = location
-
-            camera.capture(fname)
+            if take_modified_photo:
+                camera.capture(fname)
 
     def _get_photo_archive_info(self, copy=True):
         """Return information on the locally stored photos, using the 
@@ -585,6 +599,11 @@ This will contain syslog from the camera, useful for debugging problems.
         # (including a new config file, which we want to validate/read before
         # any of the config items are needed)
         self._find_usbdrive()
+
+        if os.path.exists("/run/wpa_supplicant/wlan0"):
+            self.log("WLAN device attached, block reload - assuming debugging session")
+            self.block_reload = True
+
         self.log("Have drive %s, do update %s, block reload %s" % (self.have_usb, self.do_update, self.block_reload))
 
         if not self.config:
